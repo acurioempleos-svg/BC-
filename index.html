@@ -104,6 +104,11 @@ header{background:linear-gradient(135deg,#0d0d0d,#1a1408);border-bottom:1px soli
 .pm-on{background:#101828;color:#5ba3d9;}
 .both-on{background:#1a1228;color:#b060d8;}
 .off-on{background:#1a1a1a;color:#555;}
+.he-input-wrap{display:flex;align-items:center;gap:4px;flex-shrink:0;}
+.he-label{font-size:.58rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;white-space:nowrap;}
+.he-input{width:48px;padding:4px 6px;background:var(--dark3);border:1px solid #333;border-radius:3px;color:#e08030;font-family:'Lato',sans-serif;font-size:.78rem;text-align:center;transition:border-color .2s;}
+.he-input:focus{outline:none;border-color:#e08030;}
+.he-input.has-value{border-color:#e0803060;background:#1a0f00;}
 .turno-actions{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center;}
 .cierre-banner{background:#0a1f0a;border:1px solid #27ae6050;border-radius:4px;padding:10px 14px;margin-bottom:8px;display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;}
 .cierre-banner-title{font-family:'Cinzel',serif;font-size:.68rem;letter-spacing:2px;color:var(--green);text-transform:uppercase;margin-bottom:4px;}
@@ -487,8 +492,8 @@ const COLORS      = ['#c9a84c','#5ba3d9','#e07070','#60b870','#b88dd8','#e09040'
 
 /* ── STATE ── */
 // staff[]: {id, nombre, area, rol, roles[], locales[], photo, inicio, faltas:0}
-// turnos: { local: { dateKey: { staffId: {shifts:[], activeRol, amLocal, pmLocal} } } }
-// cierres: { local: { dateKey_shift: {totalPlatos, personas[], porPuesto{}, obs, date, ts} } }
+// turnos: { local: { dateKey: { staffId: {shifts:[], activeRol, amLocal, pmLocal, he:0} } } }
+// cierres: { local: { dateKey_shift: {totalPlatos, personas[], porPuesto{}, obs, date, ts, totalHE} } }
 let state = {staff:[], turnos:{}, cierres:{}};
 let currentLocal  = 'BCP';
 let editingId     = null, currentPhoto = null;
@@ -718,6 +723,12 @@ function changeLocalForShift(staffId,key,sh,newLocal){
   const e=getEntry(staffId,td);
   const patch=sh==='AM'?{amLocal:newLocal}:{pmLocal:newLocal};
   setEntry(staffId,key,{...e,...patch});
+}
+function setHE(staffId,key,val){
+  const td=state.turnos[currentLocal][key]||{};
+  const e=getEntry(staffId,td);
+  const he=parseFloat(val)||0;
+  setEntry(staffId,key,{...e,he});
 }
 
 /* ── DOUBLE SHIFT CHECK ── */
@@ -1039,10 +1050,11 @@ function renderTurnos(){
   ['AM','PM'].forEach(sh=>{
     const c=state.cierres[l][cKey(key,sh)];if(!c)return;
     const pStats=Object.entries(c.porPuesto||{}).map(([p,n])=>`<div class="cierre-stat">${p}: <b>${n}🍽️</b></div>`).join('');
+    const heTotal=c.totalHE||0;
     cierreHtml+=`<div class="cierre-banner">
       <div>
         <div class="cierre-banner-title">✅ Turno ${sh} cerrado</div>
-        <div class="cierre-stats"><div class="cierre-stat">Total: <b>${c.totalPlatos}</b></div>${pStats}</div>
+        <div class="cierre-stats"><div class="cierre-stat">Total: <b>${c.totalPlatos}</b></div>${pStats}${heTotal>0?`<div class="cierre-stat">⏱️ HE: <b style="color:#e08030">${heTotal}h</b></div>`:''}</div>
         ${c.obs?`<div class="cierre-obs-display">💬 ${c.obs}</div>`:''}
       </div>
       <button class="btn btn-outline btn-sm" onclick="reabrirTurno('${key}','${sh}')">Reabrir</button>
@@ -1158,12 +1170,18 @@ function renderTurnos(){
       if(multiLocal&&isPM){
         localSelHtml+=`PM@<select class="t-local-sel" onchange="changeLocalForShift('${s.id}','${key}','PM',this.value)">${(s.locales||[]).map(loc=>`<option value="${loc}"${(e.pmLocal||l)===loc?' selected':''}>${loc}</option>`).join('')}</select>`;
       }
+      const heVal=e.he||0;
+      const heDisp=heVal>0?heVal:'';
       return `<div class="turno-row">
         <div class="t-avatar" style="background:${avatarColor(s.nombre)}22;border:1.5px solid ${avatarColor(s.nombre)}44">${photoHtml}</div>
         <div class="t-info">
           <div class="t-name">${s.nombre}${s.faltas>0?` <span style="font-size:.6rem;color:var(--red)">❌${s.faltas}</span>`:''}</div>
           ${rolSel}
           ${localSelHtml?`<div class="t-local-selects">${localSelHtml}</div>`:''}
+        </div>
+        <div class="he-input-wrap">
+          <span class="he-label">HE</span>
+          <input class="he-input${heVal>0?' has-value':''}" type="number" min="0" step="0.5" placeholder="0" value="${heDisp}" title="Horas extras" onchange="setHE('${s.id}','${key}',this.value)" oninput="this.classList.toggle('has-value',parseFloat(this.value)>0)">
         </div>
         <div class="shift-toggle">
           <button class="shift-btn ${isAM&&!isBoth?'am-on':''}" onclick="toggleShift('${s.id}','AM','${key}')">AM</button>
@@ -1290,7 +1308,16 @@ function saveCierre(){
     if(showP)porPuesto[ar]=(porPuesto[ar]||0)+platos;
   });
   if(!state.cierres[l])state.cierres[l]={};
-  state.cierres[l][cKey(pendingKey,pendingShift)]={totalPlatos:total,personas,porPuesto,obs,date:pendingKey,ts:Date.now()};
+  // Compute total HE from turno entries for workers in this shift
+  let totalHE=0;
+  personas.forEach(p=>{
+    const s=state.staff.find(x=>x.id===p.staffId);if(!s)return;
+    const te=getEntry(s.id,td);
+    const he=parseFloat(te.he)||0;
+    p.he=he;
+    totalHE=Math.round((totalHE+he)*10)/10;
+  });
+  state.cierres[l][cKey(pendingKey,pendingShift)]={totalPlatos:total,personas,porPuesto,obs,totalHE,date:pendingKey,ts:Date.now()};
   closeModal('cierreModal');save();renderTurnos();showToast(`✅ Turno ${pendingShift} cerrado — ${total} platos`);
 }
 
@@ -1301,6 +1328,14 @@ function reabrirTurno(key,shift){
 
 /* ── RANKING ── */
 function totalPlatos(s){return LOCALES.reduce((a,l)=>a+Object.values(state.cierres[l]||{}).reduce((b,c)=>b+(c.personas||[]).filter(p=>p.staffId===s.id).reduce((x,p)=>x+(p.platos||0),0),0),0);}
+function totalHEStaff(s){return LOCALES.reduce((a,l)=>a+Object.values(state.cierres[l]||{}).reduce((b,c)=>b+(c.personas||[]).filter(p=>p.staffId===s.id).reduce((x,p)=>x+(p.he||0),0),0),0);}
+function totalHEStaffMonth(s,y,m){
+  return LOCALES.reduce((a,l)=>a+Object.entries(state.cierres[l]||{}).reduce((b,[ck,c])=>{
+    const [dk]=ck.split('_');const d=new Date(dk+'T12:00:00');
+    if(d.getFullYear()!==y||d.getMonth()!==m)return b;
+    return b+(c.personas||[]).filter(p=>p.staffId===s.id).reduce((x,p)=>x+(p.he||0),0);
+  },0),0);
+}
 function overallScore(s){
   const eff=effectiveGrades(s);if(!eff)return 0;
   const pb=Math.min(0.5,totalPlatos(s)/500);
@@ -1326,10 +1361,11 @@ function renderRanking(){
     const ph=s.photo?`<img src="${s.photo}" alt="">`:`<span style="color:${avatarColor(s.nombre)}">${initials(s.nombre)}</span>`;
     const posC=i===0?'pos-1':i===1?'pos-2':i===2?'pos-3':'';
     const pl=totalPlatos(s);
+    const he=totalHEStaff(s);
     const localBadges=(s.locales||[]).map(l=>`<span class="local-badge badge-${l}" style="font-size:.55rem">${l}</span>`).join(' ');
     const confBar=eff?`<span style="font-size:.6rem;color:${eff.conf<30?'var(--orange)':eff.conf<70?'var(--gold)':'var(--green)'}">▪ ${eff.conf}% confianza (${eff.count} turnos)</span>`:'';
     const gradesH=eff
-      ?`<span class="rank-grade-pill g-${eff.puntualidad}">Punt ${eff.puntualidad}</span><span class="rank-grade-pill g-${eff.rendimiento}">Rend ${eff.rendimiento}</span><span class="rank-grade-pill g-${eff.actitud}">Act ${eff.actitud}</span>${pl>0?`<span class="rank-grade-pill" style="color:#aaa">🍽️ ${pl}</span>`:''}`
+      ?`<span class="rank-grade-pill g-${eff.puntualidad}">Punt ${eff.puntualidad}</span><span class="rank-grade-pill g-${eff.rendimiento}">Rend ${eff.rendimiento}</span><span class="rank-grade-pill g-${eff.actitud}">Act ${eff.actitud}</span>${pl>0?`<span class="rank-grade-pill" style="color:#aaa">🍽️ ${pl}</span>`:''}${he>0?`<span class="rank-grade-pill" style="color:#e08030">⏱️ ${he}h HE</span>`:''}`
       :`<span style="font-size:.7rem;color:var(--text-muted);font-style:italic">Sin cierres aún</span>`;
     const ov=eff?overallGrade(s):'—';
     return `<div class="rank-item">
@@ -1371,11 +1407,13 @@ function renderNovedades(){
       if(isAbs){abC++;return `<td class="nov-day-cell"><span class="shift-abs">F</span></td>`;}
       return `<td class="nov-day-cell"><span class="shift-off">—</span></td>`;
     }).join('');
+    const heMonth=totalHEStaffMonth(s,y,m);
     return `<tr><td class="nov-name-cell">${s.nombre}<div style="font-size:.58rem;color:var(--text-muted)">${s.rol}</div></td>${cells}<td class="nov-total-cell">${amC+pmC+bC}</td>
+      <td style="text-align:center;font-size:.72rem;color:${heMonth>0?'#e08030':'#333'};font-weight:${heMonth>0?'700':'400'}">${heMonth>0?heMonth+'h':'—'}</td>
       <td>${amC>0?`<span class="nov-badge nov-badge-am">${amC}AM</span> `:''}${pmC>0?`<span class="nov-badge nov-badge-pm">${pmC}PM</span> `:''}${bC>0?`<span class="nov-badge nov-badge-both">${bC}A+P</span> `:''}${abC>0?`<span class="nov-badge nov-badge-abs">${abC}F</span>`:''}</td></tr>`;
   }).join('');
   const sumC=days.map(d=>{const td=(state.turnos[currentLocal]||{})[d.key]||{};const n=members.filter(s=>getEntry(s.id,td).shifts.length>0).length;return `<td class="nov-day-cell" style="color:${n>0?'var(--gold)':'#333'}">${n>0?n:''}</td>`;}).join('');
-  document.getElementById('novContent').innerHTML=`<table class="nov-table"><thead><tr><th style="min-width:115px">Colaborador</th>${dayH}<th>Días</th><th>Resumen</th></tr></thead><tbody>${rows}<tr class="nov-summary-row"><td style="color:var(--text-muted);font-size:.6rem;letter-spacing:1px;text-transform:uppercase">Personal</td>${sumC}<td></td><td></td></tr></tbody></table>`;
+  document.getElementById('novContent').innerHTML=`<table class="nov-table"><thead><tr><th style="min-width:115px">Colaborador</th>${dayH}<th>Días</th><th style="text-align:center">⏱️ HE</th><th>Resumen</th></tr></thead><tbody>${rows}<tr class="nov-summary-row"><td style="color:var(--text-muted);font-size:.6rem;letter-spacing:1px;text-transform:uppercase">Personal</td>${sumC}<td></td><td></td><td></td></tr></tbody></table>`;
 }
 
 /* ── RECOMENDACIÓN ── */
@@ -1526,7 +1564,7 @@ function exportarExcelSemana(){
   // Sheet 1: Resumen semanal (persona x día)
   const wsData=[];
   // Header row
-  const header=['Nombre','Puesto','Área',...days.map(d=>`${DAYS_ES[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`),'Total AM','Total PM','Total Dobles'];
+  const header=['Nombre','Puesto','Área',...days.map(d=>`${DAYS_ES[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`),'Total AM','Total PM','Total Dobles','HE (hs)'];
   wsData.push(header);
 
   let colTotalsAM=new Array(7).fill(0);
@@ -1545,7 +1583,15 @@ function exportarExcelSemana(){
       else if(e.shifts.includes('PM')){cell='PM';tPM++;colTotalsPM[i]++;}
       row.push(cell);
     });
-    row.push(tAM,tPM,tDoble);
+    // HE acumuladas en la semana para este local
+    let weekHE=0;
+    days.forEach(d=>{
+      const dk=dateKey(d);
+      const td=(state.turnos[l]||{})[dk]||{};
+      const e=getEntry(s.id,td);
+      weekHE=Math.round((weekHE+(parseFloat(e.he)||0))*10)/10;
+    });
+    row.push(tAM,tPM,tDoble,weekHE||'');
     wsData.push(row);
   });
 
@@ -1555,7 +1601,7 @@ function exportarExcelSemana(){
 
   // Sheet 2: Detalle por día
   const ws2Data=[];
-  ws2Data.push(['Fecha','Día','Nombre','Puesto','Área','Turno','Local asignado']);
+  ws2Data.push(['Fecha','Día','Nombre','Puesto','Área','Turno','Local asignado','HE (hs)']);
   days.forEach(d=>{
     const dk=dateKey(d);
     const td=(state.turnos[l]||{})[dk]||{};
@@ -1563,9 +1609,10 @@ function exportarExcelSemana(){
     members.forEach(s=>{
       const e=getEntry(s.id,td);
       if(!e.shifts.length)return;
+      const heVal=parseFloat(e.he)||0;
       e.shifts.forEach(sh=>{
         const assignedLocal=sh==='AM'?(e.amLocal||l):(e.pmLocal||l);
-        ws2Data.push([dk, dayLabel, s.nombre, getActiveRolForExport(s), s.area==='cocina'?'Cocina':'Salón', sh, assignedLocal]);
+        ws2Data.push([dk, dayLabel, s.nombre, getActiveRolForExport(s), s.area==='cocina'?'Cocina':'Salón', sh, assignedLocal, heVal||'']);
       });
     });
   });
@@ -1574,9 +1621,8 @@ function exportarExcelSemana(){
   const ws1=XLSX.utils.aoa_to_sheet(wsData);
   const ws2=XLSX.utils.aoa_to_sheet(ws2Data);
 
-  // Column widths sheet1
-  ws1['!cols']=[{wch:22},{wch:16},{wch:9},...new Array(7).fill({wch:13}),{wch:10},{wch:10},{wch:12}];
-  ws2['!cols']=[{wch:12},{wch:22},{wch:22},{wch:16},{wch:9},{wch:8},{wch:10}];
+  ws1['!cols']=[{wch:22},{wch:16},{wch:9},...new Array(7).fill({wch:13}),{wch:10},{wch:10},{wch:12},{wch:9}];
+  ws2['!cols']=[{wch:12},{wch:22},{wch:22},{wch:16},{wch:9},{wch:8},{wch:10},{wch:9}];
 
   XLSX.utils.book_append_sheet(wb,ws1,'Semana '+l);
   XLSX.utils.book_append_sheet(wb,ws2,'Detalle '+l);
